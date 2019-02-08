@@ -14,14 +14,24 @@ import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
+import org.apache.nifi.record.path.FieldValue;
+import org.apache.nifi.record.path.RecordPath;
+import org.apache.nifi.record.path.RecordPathResult;
 import org.apache.nifi.record.path.util.RecordPathCache;
+import org.apache.nifi.serialization.RecordReader;
 import org.apache.nifi.serialization.RecordReaderFactory;
+import org.apache.nifi.serialization.RecordSetWriter;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
+import org.apache.nifi.serialization.RecordWriter;
+import org.apache.nifi.serialization.record.Record;
 
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
@@ -113,6 +123,53 @@ public class DetectDuplicateRecords extends AbstractProcessor {
         FlowFile input = session.get();
         if (input == null) {
             return;
+        }
+
+        FlowFile duplicates = session.create(input);
+        FlowFile notDuplicates = session.create(input);
+
+        try (InputStream is = session.read(input);
+             OutputStream dOS = session.write(duplicates);
+            OutputStream ndOS = session.write(notDuplicates)) {
+
+            RecordReader reader = readerFactory.createRecordReader(input, is, getLogger());
+            RecordSetWriter dupeWriter = writerFactory.createWriter(getLogger(), writerFactory.getSchema(input.getAttributes(), null), dOS);
+            RecordSetWriter notDupeWriter = writerFactory.createWriter(getLogger(), writerFactory.getSchema(input.getAttributes(), null), ndOS);
+
+            String recordPath = context.getProperty(RECORD_PATH).evaluateAttributeExpressions(input).getValue();
+            RecordPath path = recordPathCache.getCompiled(recordPath);
+
+            Record record;
+            dupeWriter.beginRecordSet();
+            notDupeWriter.beginRecordSet();
+            while ((record = reader.nextRecord()) != null) {
+                RecordPathResult result = path.evaluate(record);
+                Optional<FieldValue> fieldValue = result.getSelectedFields().findFirst();
+                if (fieldValue.isPresent()) {
+                    FieldValue value = fieldValue.get();
+                    String valueAsString = value.getValue().toString();
+
+                    if (getLogger().isDebugEnabled()) {
+                        getLogger().debug(String.format("Doing lookup using result %s", valueAsString));
+                    }
+                }
+            }
+            dupeWriter.finishRecordSet();
+            notDupeWriter.finishRecordSet();
+            dupeWriter.close();
+            notDupeWriter.close();
+            ndOS.close();
+            dOS.close();
+            is.close();
+
+            session.transfer(duplicates, REL_DUPLICATES);
+            session.transfer(notDuplicates, REL_NOT_DUPLICATE);
+            session.transfer(input, REL_ORIGINAL);
+        } catch (Exception ex) {
+            getLogger().error("Failed in detecting duplicate records.", ex);
+            session.remove(duplicates);
+            session.remove(notDuplicates);
+            session.transfer(input, REL_FAILURE);
         }
     }
 }
