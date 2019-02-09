@@ -6,6 +6,7 @@ import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.Validator;
 import org.apache.nifi.distributed.cache.client.DistributedMapCacheClient;
+import org.apache.nifi.distributed.cache.client.Serializer;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.AbstractProcessor;
@@ -109,6 +110,7 @@ public class DetectDuplicateRecords extends AbstractProcessor {
     private volatile RecordSetWriterFactory writerFactory;
     private volatile DistributedMapCacheClient mapCacheClient;
     private RecordPathCache recordPathCache;
+    private Serializer<String> serializer = new StringSerializer();
 
     @OnScheduled
     public void onScheduled(ProcessContext context) {
@@ -142,6 +144,9 @@ public class DetectDuplicateRecords extends AbstractProcessor {
             Record record;
             dupeWriter.beginRecordSet();
             notDupeWriter.beginRecordSet();
+
+            long dupeCount = 0;
+            long notDupeCount = 0;
             while ((record = reader.nextRecord()) != null) {
                 RecordPathResult result = path.evaluate(record);
                 Optional<FieldValue> fieldValue = result.getSelectedFields().findFirst();
@@ -152,6 +157,16 @@ public class DetectDuplicateRecords extends AbstractProcessor {
                     if (getLogger().isDebugEnabled()) {
                         getLogger().debug(String.format("Doing lookup using result %s", valueAsString));
                     }
+
+                    boolean exists = mapCacheClient.containsKey(valueAsString, serializer);
+                    if (exists) {
+                        dupeWriter.write(record);
+                        dupeCount++;
+                    } else {
+                        mapCacheClient.putIfAbsent(valueAsString, "exists", serializer, serializer);
+                        notDupeWriter.write(record);
+                        notDupeCount++;
+                    }
                 }
             }
             dupeWriter.finishRecordSet();
@@ -161,6 +176,9 @@ public class DetectDuplicateRecords extends AbstractProcessor {
             ndOS.close();
             dOS.close();
             is.close();
+
+            duplicates = session.putAttribute(duplicates, "record.count", String.valueOf(dupeCount));
+            notDuplicates = session.putAttribute(notDuplicates, "record.count", String.valueOf(notDupeCount));
 
             session.transfer(duplicates, REL_DUPLICATES);
             session.transfer(notDuplicates, REL_NOT_DUPLICATE);
