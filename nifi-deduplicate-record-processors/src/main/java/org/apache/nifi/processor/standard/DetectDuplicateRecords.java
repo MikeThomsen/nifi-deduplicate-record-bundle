@@ -24,7 +24,6 @@ import org.apache.nifi.serialization.RecordReader;
 import org.apache.nifi.serialization.RecordReaderFactory;
 import org.apache.nifi.serialization.RecordSetWriter;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
-import org.apache.nifi.serialization.RecordWriter;
 import org.apache.nifi.serialization.record.Record;
 
 import java.io.InputStream;
@@ -71,9 +70,19 @@ public class DetectDuplicateRecords extends AbstractProcessor {
         .addValidator(StandardValidators.NON_EMPTY_EL_VALIDATOR)
         .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
         .build();
+    public static final PropertyDescriptor REMOVE_EMPTY = new PropertyDescriptor.Builder()
+        .name("ddr-remove-empty")
+        .displayName("Don't Send Empty Record Sets")
+        .description("If either the duplicate or not duplicate record sets are empty, don't send them to the output " +
+                "relationship upon successful execution.")
+        .allowableValues("true", "false")
+        .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
+        .required(true)
+        .defaultValue("false")
+        .build();
 
     public static final List<PropertyDescriptor> DESCRIPTORS = Collections.unmodifiableList(Arrays.asList(
-        RECORD_READER, RECORD_WRITER, MAP_CACHE_SERVICE, RECORD_PATH
+        RECORD_READER, RECORD_WRITER, MAP_CACHE_SERVICE, RECORD_PATH, REMOVE_EMPTY
     ));
 
     public static final Relationship REL_DUPLICATES = new Relationship.Builder()
@@ -112,6 +121,7 @@ public class DetectDuplicateRecords extends AbstractProcessor {
     private volatile DistributedMapCacheClient mapCacheClient;
     private RecordPathCache recordPathCache;
     private Serializer<String> serializer = new StringSerializer();
+    private boolean removeEmpty;
 
     @OnScheduled
     public void onScheduled(ProcessContext context) {
@@ -119,6 +129,7 @@ public class DetectDuplicateRecords extends AbstractProcessor {
         writerFactory = context.getProperty(RECORD_WRITER).asControllerService(RecordSetWriterFactory.class);
         mapCacheClient = context.getProperty(MAP_CACHE_SERVICE).asControllerService(DistributedMapCacheClient.class);
         recordPathCache = new RecordPathCache(25);
+        removeEmpty = context.getProperty(REMOVE_EMPTY).asBoolean();
     }
 
     @Override
@@ -188,11 +199,20 @@ public class DetectDuplicateRecords extends AbstractProcessor {
             dOS.close();
             is.close();
 
-            duplicates = session.putAttribute(duplicates, "record.count", String.valueOf(dupeCount));
-            notDuplicates = session.putAttribute(notDuplicates, "record.count", String.valueOf(notDupeCount));
+            if (!removeEmpty || (removeEmpty && dupeCount > 0)) {
+                duplicates = session.putAttribute(duplicates, "record.count", String.valueOf(dupeCount));
+                session.transfer(duplicates, REL_DUPLICATES);
+            } else {
+                session.remove(duplicates);
+            }
 
-            session.transfer(duplicates, REL_DUPLICATES);
-            session.transfer(notDuplicates, REL_NOT_DUPLICATE);
+            if (!removeEmpty || (removeEmpty && notDupeCount > 0)) {
+                notDuplicates = session.putAttribute(notDuplicates, "record.count", String.valueOf(notDupeCount));
+                session.transfer(notDuplicates, REL_NOT_DUPLICATE);
+            } else {
+                session.remove(notDuplicates);
+            }
+
             session.transfer(input, REL_ORIGINAL);
         } catch (Exception ex) {
             getLogger().error("Failed in detecting duplicate records.", ex);

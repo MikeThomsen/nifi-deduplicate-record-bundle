@@ -47,8 +47,15 @@ class TestDetectDuplicateRecords {
         runner.assertTransferCount(DetectDuplicateRecords.REL_DUPLICATES, duplicates)
         runner.assertTransferCount(DetectDuplicateRecords.REL_NOT_DUPLICATE, notDuplicates)
 
-        assertEquals(String.valueOf(dupeCount), runner.getFlowFilesForRelationship(DetectDuplicateRecords.REL_DUPLICATES)[0].getAttribute("record.count"))
-        assertEquals(String.valueOf(notDupeCount), runner.getFlowFilesForRelationship(DetectDuplicateRecords.REL_NOT_DUPLICATE)[0].getAttribute("record.count"))
+        def dupeFFs = runner.getFlowFilesForRelationship(DetectDuplicateRecords.REL_DUPLICATES)
+        if (dupeFFs) {
+            assertEquals(String.valueOf(dupeCount), dupeFFs[0].getAttribute("record.count"))
+        }
+
+        def notDupeFFs = runner.getFlowFilesForRelationship(DetectDuplicateRecords.REL_NOT_DUPLICATE)
+        if (notDupeFFs) {
+            assertEquals(String.valueOf(notDupeCount), notDupeFFs[0].getAttribute("record.count"))
+        }
     }
 
     @Test
@@ -95,8 +102,8 @@ class TestDetectDuplicateRecords {
         doCountTests(0, 1, 1, 1, 3, 0)
     }
 
-    @Test
-    void testAllDuplicates() {
+
+    void testAllDuplicates(boolean removeEmpty) {
         runner.setProperty(DetectDuplicateRecords.RECORD_PATH, "/firstName")
         def serializer = new StringSerializer()
         ["John", "Jack", "Jane"].each { name ->
@@ -117,9 +124,20 @@ class TestDetectDuplicateRecords {
             reader.addRecord(record.toArray())
         }
 
+        runner.setProperty(DetectDuplicateRecords.REMOVE_EMPTY, String.valueOf(removeEmpty))
         runner.enqueue("")
         runner.run()
 
-        doCountTests(0, 1, 1, 1, 0, 3)
+        doCountTests(0, 1, 1, removeEmpty ? 0 : 1, 0, 3)
+    }
+
+    @Test
+    void testAllAreDuplicates() {
+        testAllDuplicates(false)
+    }
+
+    @Test
+    void testRemoveEmpty() {
+        testAllDuplicates(true)
     }
 }
