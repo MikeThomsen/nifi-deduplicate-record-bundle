@@ -1,6 +1,7 @@
 package org.apache.nifi.processor
 
 import org.apache.nifi.processor.standard.DetectDuplicateRecords
+import org.apache.nifi.processor.standard.StringSerializer
 import org.apache.nifi.serialization.record.MockRecordParser
 import org.apache.nifi.serialization.record.MockRecordWriter
 import org.apache.nifi.serialization.record.RecordField
@@ -14,10 +15,11 @@ import static org.junit.Assert.*
 class TestDetectDuplicateRecords {
     TestRunner runner
     MockRecordParser reader
+    MockCacheService mockCache
 
     @Before
     void setup() {
-        def mockCache = new MockCacheService()
+        mockCache = new MockCacheService()
         reader = new MockRecordParser()
         def writer = new MockRecordWriter()
 
@@ -91,5 +93,33 @@ class TestDetectDuplicateRecords {
         runner.run()
 
         doCountTests(0, 1, 1, 1, 3, 0)
+    }
+
+    @Test
+    void testAllDuplicates() {
+        runner.setProperty(DetectDuplicateRecords.RECORD_PATH, "/firstName")
+        def serializer = new StringSerializer()
+        ["John", "Jack", "Jane"].each { name ->
+            mockCache.putIfAbsent(name, "exists", serializer, serializer)
+        }
+
+        [
+            [
+                "John", "Q", "Smith"
+            ],
+            [
+                "Jack", "Z", "Brown"
+            ],
+            [
+                "Jane", "X", "Doe"
+            ]
+        ].each { record ->
+            reader.addRecord(record.toArray())
+        }
+
+        runner.enqueue("")
+        runner.run()
+
+        doCountTests(0, 1, 1, 1, 0, 3)
     }
 }

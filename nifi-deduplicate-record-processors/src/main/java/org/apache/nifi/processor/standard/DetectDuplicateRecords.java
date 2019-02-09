@@ -9,6 +9,7 @@ import org.apache.nifi.distributed.cache.client.DistributedMapCacheClient;
 import org.apache.nifi.distributed.cache.client.Serializer;
 import org.apache.nifi.expression.ExpressionLanguageScope;
 import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
@@ -147,6 +148,8 @@ public class DetectDuplicateRecords extends AbstractProcessor {
 
             long dupeCount = 0;
             long notDupeCount = 0;
+            ComponentLog logger = getLogger();
+
             while ((record = reader.nextRecord()) != null) {
                 RecordPathResult result = path.evaluate(record);
                 Optional<FieldValue> fieldValue = result.getSelectedFields().findFirst();
@@ -154,18 +157,26 @@ public class DetectDuplicateRecords extends AbstractProcessor {
                     FieldValue value = fieldValue.get();
                     String valueAsString = value.getValue().toString();
 
-                    if (getLogger().isDebugEnabled()) {
-                        getLogger().debug(String.format("Doing lookup using result %s", valueAsString));
+                    if (logger.isDebugEnabled()) {
+                        logger.debug(String.format("Doing lookup using result %s", valueAsString));
                     }
 
                     boolean exists = mapCacheClient.containsKey(valueAsString, serializer);
                     if (exists) {
                         dupeWriter.write(record);
                         dupeCount++;
+
+                        if (logger.isDebugEnabled()) {
+                            logger.debug("Wrote a duplicate.");
+                        }
                     } else {
                         mapCacheClient.putIfAbsent(valueAsString, "exists", serializer, serializer);
                         notDupeWriter.write(record);
                         notDupeCount++;
+
+                        if (logger.isDebugEnabled()) {
+                            logger.debug("Wrote a non-duplicate.");
+                        }
                     }
                 }
             }
