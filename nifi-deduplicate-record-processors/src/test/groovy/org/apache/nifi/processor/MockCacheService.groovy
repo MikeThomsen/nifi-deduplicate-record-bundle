@@ -53,4 +53,8 @@ class MockCacheService extends AbstractControllerService implements DistributedM
     long removeByPattern(String s) throws IOException {
         return 0
     }
+
+    void assertContains(String key, String value) {
+        assert map.containsKey(key) && map[key] == value
+    }
 }

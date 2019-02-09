@@ -140,4 +140,31 @@ class TestDetectDuplicateRecords {
     void testRemoveEmpty() {
         testAllDuplicates(true)
     }
+
+    @Test
+    void testCacheValueFromRecordPath() {
+        runner.setProperty(DetectDuplicateRecords.CACHE_VALUE_STRATEGY, DetectDuplicateRecords.STRAGEGY_RECORD_PATH)
+        runner.setProperty(DetectDuplicateRecords.CACHE_VALUE, "/firstName")
+        [
+            [
+                "John", "Q", "Smith"
+            ],
+            [
+                "John", "Q", "Smith"
+            ],
+            [
+                "Jane", "X", "Doe"
+            ]
+        ].each { record ->
+            reader.addRecord(record.toArray())
+        }
+
+        runner.enqueue("")
+        runner.run()
+
+        doCountTests(0, 1, 1, 1, 2, 1)
+
+        mockCache.assertContains("John-Q-Smith", "John")
+        mockCache.assertContains("Jane-X-Doe", "Jane")
+    }
 }

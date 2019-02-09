@@ -3,6 +3,7 @@ package org.apache.nifi.processor.standard;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
+import org.apache.nifi.components.AllowableValue;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.Validator;
 import org.apache.nifi.distributed.cache.client.DistributedMapCacheClient;
@@ -70,6 +71,31 @@ public class DetectDuplicateRecords extends AbstractProcessor {
         .addValidator(StandardValidators.NON_EMPTY_EL_VALIDATOR)
         .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
         .build();
+    public static final AllowableValue STRATEGY_LITERAL = new AllowableValue("literal", "Literal", "Take a plain value " +
+            "either from this field or combined with Expression Language based on flowfile attributes.");
+    public static final AllowableValue STRAGEGY_RECORD_PATH = new AllowableValue("record_path", "Record Path", "Execute " +
+            "a record path operation to get the value.");
+    public static final PropertyDescriptor CACHE_VALUE_STRATEGY = new PropertyDescriptor.Builder()
+        .name("ddr-cache-value-strategy")
+        .displayName("Cache Value Strategy")
+        .description("This determines what will be written to the cache from the record. It can be either a literal value " +
+                "or the result of a record path operation. This configuration option helps with ensuring the cache can be used " +
+                "as a lookup table by other services if desired.")
+        .allowableValues(STRATEGY_LITERAL, STRAGEGY_RECORD_PATH)
+        .defaultValue(STRATEGY_LITERAL.getValue())
+        .required(true)
+        .addValidator(Validator.VALID)
+        .build();
+    public static final PropertyDescriptor CACHE_VALUE = new PropertyDescriptor.Builder()
+        .name("ddr-cache-value")
+        .displayName("Cache Value")
+        .description("This is the value that will be written to the cache at the appropriate record and record key if it " +
+                "does not exist.")
+        .addValidator(StandardValidators.NON_EMPTY_EL_VALIDATOR)
+        .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+        .required(true)
+        .defaultValue("exists")
+        .build();
     public static final PropertyDescriptor REMOVE_EMPTY = new PropertyDescriptor.Builder()
         .name("ddr-remove-empty")
         .displayName("Don't Send Empty Record Sets")
@@ -82,7 +108,7 @@ public class DetectDuplicateRecords extends AbstractProcessor {
         .build();
 
     public static final List<PropertyDescriptor> DESCRIPTORS = Collections.unmodifiableList(Arrays.asList(
-        RECORD_READER, RECORD_WRITER, MAP_CACHE_SERVICE, RECORD_PATH, REMOVE_EMPTY
+        RECORD_READER, RECORD_WRITER, MAP_CACHE_SERVICE, RECORD_PATH, CACHE_VALUE_STRATEGY, CACHE_VALUE, REMOVE_EMPTY
     ));
 
     public static final Relationship REL_DUPLICATES = new Relationship.Builder()
@@ -122,14 +148,39 @@ public class DetectDuplicateRecords extends AbstractProcessor {
     private RecordPathCache recordPathCache;
     private Serializer<String> serializer = new StringSerializer();
     private boolean removeEmpty;
+    private boolean useRecordPathForValue;
 
     @OnScheduled
     public void onScheduled(ProcessContext context) {
         readerFactory = context.getProperty(RECORD_READER).asControllerService(RecordReaderFactory.class);
         writerFactory = context.getProperty(RECORD_WRITER).asControllerService(RecordSetWriterFactory.class);
         mapCacheClient = context.getProperty(MAP_CACHE_SERVICE).asControllerService(DistributedMapCacheClient.class);
-        recordPathCache = new RecordPathCache(25);
+        recordPathCache = new RecordPathCache(50);
         removeEmpty = context.getProperty(REMOVE_EMPTY).asBoolean();
+
+        String valueStrategy = context.getProperty(CACHE_VALUE_STRATEGY).getValue();
+        useRecordPathForValue = valueStrategy.equals(STRAGEGY_RECORD_PATH.getValue());
+    }
+
+    private Optional<String> getCacheValue(ProcessContext context, FlowFile input, Record record) {
+        String rawConfiguration = context.getProperty(CACHE_VALUE).evaluateAttributeExpressions(input).getValue();
+        if (useRecordPathForValue) {
+            RecordPath path = recordPathCache.getCompiled(rawConfiguration);
+            RecordPathResult rpResult = path.evaluate(record);
+            Optional<FieldValue> result = rpResult.getSelectedFields().findFirst();
+            if (result.isPresent()) {
+                FieldValue value = result.get();
+                if (value.getValue() != null) {
+                    return Optional.ofNullable(value.getValue().toString());
+                } else {
+                    return Optional.empty();
+                }
+            } else {
+                return Optional.empty();
+            }
+        } else {
+            return Optional.ofNullable(rawConfiguration);
+        }
     }
 
     @Override
@@ -181,7 +232,11 @@ public class DetectDuplicateRecords extends AbstractProcessor {
                             logger.debug("Wrote a duplicate.");
                         }
                     } else {
-                        mapCacheClient.putIfAbsent(valueAsString, "exists", serializer, serializer);
+                        Optional<String> cacheValue = getCacheValue(context, input, record);
+                        if (!cacheValue.isPresent()) {
+                            throw new ProcessException("Cache value resolved to an empty/missing value. Cannot continue.");
+                        }
+                        mapCacheClient.putIfAbsent(valueAsString, cacheValue.get(), serializer, serializer);
                         notDupeWriter.write(record);
                         notDupeCount++;
 
